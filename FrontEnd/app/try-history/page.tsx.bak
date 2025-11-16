@@ -1,0 +1,316 @@
+"use client"
+
+import Link from "next/link"
+import Image from "next/image"
+import { Button } from "@/components/ui/button"
+import { useEffect, useState } from "react"
+import { formatDistanceToNow } from "@/lib/utils"
+import { Eye, History, RefreshCw, Trash2, X } from "lucide-react"
+import { getHistory, deleteHistoryItem, TryOnHistoryItem } from "@/lib/supabase-helpers"
+import { Badge } from "@/components/ui/badge"
+import { Dialog, DialogContent, DialogClose } from "@/components/ui/dialog"
+import { useToast } from "@/components/ui/use-toast"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+
+export default function TryHistoryPage() {
+  const [history, setHistory] = useState<TryOnHistoryItem[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [previewImage, setPreviewImage] = useState<string | null>(null)
+  const [deleteItemId, setDeleteItemId] = useState<string | null>(null)
+  const { toast } = useToast()
+
+  const loadHistory = async () => {
+    setIsLoading(true)
+    try {
+      const data = await getHistory()
+      setHistory(data)
+    } catch (error) {
+      console.error('Error loading history:', error)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadHistory()
+  }, [])
+
+  // Handle delete item
+  const handleDelete = (id: string) => {
+    setDeleteItemId(id)
+  }
+
+  // Confirm delete handler
+  const confirmDelete = async () => {
+    if (!deleteItemId) return
+
+    try {
+      const success = await deleteHistoryItem(deleteItemId)
+      if (success) {
+        toast({
+          title: "Success",
+          description: "Try-on result removed successfully",
+          variant: "default",
+        })
+        // Refresh the history list
+        loadHistory()
+      } else {
+        toast({
+          title: "Error",
+          description: "Failed to remove try-on result",
+          variant: "destructive",
+        })
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "An unexpected error occurred",
+        variant: "destructive",
+      })
+    } finally {
+      setDeleteItemId(null)
+    }
+  }
+
+  // Cancel delete handler
+  const cancelDelete = () => {
+    setDeleteItemId(null)
+  }
+
+  return (
+    <div className="container py-10">
+      <div className="flex items-center justify-between mb-8">
+        <div className="flex items-center gap-2">
+          <History className="h-6 w-6 text-primary" />
+          <h1 className="text-3xl font-bold">Your Try-On History</h1>
+        </div>
+        <Button variant="outline" size="sm" onClick={loadHistory} className="gap-2">
+          <RefreshCw className="h-4 w-4" />
+          Refresh
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="text-center py-12">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto"></div>
+          <p className="mt-4 text-muted-foreground">Loading try-on history...</p>
+        </div>
+      ) : history.length === 0 ? (
+        <div className="text-center py-12 border rounded-xl bg-secondary/20">
+          <h2 className="text-xl font-medium mb-4">No try-on history yet</h2>
+          <p className="text-muted-foreground mb-6">
+            You haven't tried on any clothes yet. Start exploring our collection!
+          </p>
+          <Button asChild>
+            <Link href="/categories">Browse Categories</Link>
+          </Button>
+        </div>
+      ) : (
+        <div className="grid gap-6">
+          {history.map((item) => (
+            <div
+              key={item.id}
+              className="border rounded-lg shadow-sm overflow-hidden"
+            >
+              <div className="flex justify-between items-center p-3 bg-muted/30 border-b">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{item.product_name}</span>
+                  {item.status === 'completed' && (
+                    <Badge variant="success">Completed</Badge>
+                  )}
+                  {item.status === 'pending' && (
+                    <Badge variant="default">Pending</Badge>
+                  )}
+                  {item.status === 'processing' && (
+                    <Badge variant="secondary">Processing</Badge>
+                  )}
+                  {item.status === 'failed' && (
+                    <Badge variant="destructive">Failed</Badge>
+                  )}
+                </div>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleDelete(item.id!)}
+                        className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Remove from history</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              
+              <div className="p-4 flex items-center gap-4">
+                <div className="flex-shrink-0 flex gap-2">
+                {/* User Photo */}
+                <div 
+                  className="relative cursor-pointer"
+                  onClick={() => setPreviewImage(item.user_image_url)}
+                >
+                  <Image
+                    src={item.user_image_url || "/placeholder-user.jpg"}
+                    alt="Your photo"
+                    width={100}
+                    height={130}
+                    className="rounded-md object-cover border border-gray-200 hover:border-primary transition-colors"
+                  />
+                  <div className="absolute bottom-0 left-0 bg-black/70 text-white text-xs px-1 rounded-bl-md">
+                    You
+                  </div>
+                </div>
+                
+                {/* Clothing Item */}
+                <div 
+                  className="relative cursor-pointer"
+                  onClick={() => setPreviewImage(item.cloth_image_url || item.product_image)}
+                >
+                  <Image
+                    src={item.cloth_image_url || item.product_image || "/placeholder.svg"}
+                    alt="Clothing item"
+                    width={100}
+                    height={130}
+                    className="rounded-md object-cover border border-gray-200 hover:border-primary transition-colors"
+                  />
+                  <div className="absolute bottom-0 left-0 bg-black/70 text-white text-xs px-1 rounded-bl-md">
+                    Item
+                  </div>
+                </div>
+                
+                {/* Result Image */}
+                <div 
+                  className="relative cursor-pointer"
+                  onClick={() => setPreviewImage(item.result_image_url)}
+                >
+                  <Image
+                    src={item.result_image_url || "/placeholder.svg"}
+                    alt={item.product_name}
+                    width={100}
+                    height={130}
+                    className="rounded-md object-cover border border-gray-200 hover:border-primary transition-colors"
+                  />
+                  <div className="absolute bottom-0 left-0 bg-black/70 text-white text-xs px-1 rounded-bl-md">
+                    Result
+                  </div>
+                </div>
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-medium">{item.product_name}</h3>
+                  {item.status === 'completed' && (
+                    <Badge variant="success">Completed</Badge>
+                  )}
+                  {item.status === 'pending' && (
+                    <Badge variant="default">Pending</Badge>
+                  )}
+                  {item.status === 'processing' && (
+                    <Badge variant="secondary">Processing</Badge>
+                  )}
+                  {item.status === 'failed' && (
+                    <Badge variant="destructive">Failed</Badge>
+                  )}
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Tried on {item.created_at ? formatDistanceToNow(new Date(item.created_at)) : 'recently'}
+                </p>
+                {item.status === 'failed' && (
+                  <p className="text-sm text-red-600 mt-1">{item.error || 'Processing failed'}</p>
+                )}
+              </div>
+              <div className="flex flex-col gap-2">
+                <Button asChild variant="outline" size="sm" className="gap-1">
+                  <Link href={`/try-on/${item.product_id}`}>
+                    <Eye className="h-4 w-4" />
+                    Try Again
+                  </Link>
+                </Button>
+                
+                <div className="flex gap-1">
+                  <Button 
+                    variant="secondary" 
+                    size="sm" 
+                    onClick={() => setPreviewImage(item.result_image_url)}
+                    disabled={!item.result_image_url}
+                  >
+                    View
+                  </Button>
+                  
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleDelete(item.id!)}
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
+                  title="Remove this result"
+                >
+                  <Trash2 className="h-4 w-4 mr-1" />
+                  Remove
+                </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Image Preview Modal */}
+      {previewImage && (
+        <Dialog open={!!previewImage} onOpenChange={() => setPreviewImage(null)}>
+          <DialogContent className="sm:max-w-[90vw] max-h-[90vh] overflow-hidden p-0">
+            <img 
+              src={previewImage} 
+              alt="Preview" 
+              className="w-full h-full object-contain"
+            />
+            <DialogClose className="absolute top-4 right-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+              <X className="h-6 w-6" />
+              <span className="sr-only">Close</span>
+            </DialogClose>
+          </DialogContent>
+        </Dialog>
+      )}
+      
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={!!deleteItemId} onOpenChange={(open) => !open && setDeleteItemId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove this try-on result from your history.
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={cancelDelete}>Cancel</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+}

@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "name": "T-Shirts",
+    "slug": "t-shirts",
+    "image": "/categories/T-shirts.jpeg"
+  },
+  {
+    "id": 2,
+    "name": "Full Sleeves",
+    "slug": "full-sleeves",
+    "image": "/categories/full.jpeg"
+  },
+  {
+    "id": 3,
+    "name": "Hoodies",
+    "slug": "hoodies",
+    "image": "/categories/hoodies.jpeg"
+  },
+  {
+    "id": 4,
+    "name": "Polo",
+    "slug": "polo",
+    "image": "/categories/polo.jpeg"
+  },
+  {
+    "id": 5,
+    "name": "Pants",
+    "slug": "pants",
+    "image": "/categories/pants.jpg"
+  },
+  {
+    "id": 6,
+    "name": "Shorts",
+    "slug": "shorts",
+    "image": "/categories/shorts.jpg"
+  },
+  {
+    "id": 7,
+    "name": "Cargo",
+    "slug": "cargo",
+    "image": "/categories/cargo.jpg"
+  },
+  {
+    "id": 8,
+    "name": "Jeans",
+    "slug": "jeans",
+    "image": "/categories/jeans.jpg"
+  }
+]
