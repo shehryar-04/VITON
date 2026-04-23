@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# pytest / hypothesis
+.pytest_cache/
+.hypothesis/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files created by DensePose predictor
+mask_generation_tmp/
+densepose_/tmp/

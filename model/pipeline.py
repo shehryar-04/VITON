@@ -8,8 +8,7 @@ import torch
 import tqdm
 from accelerate import load_checkpoint_in_model
 from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
-from diffusers.pipelines.stable_diffusion.safety_checker import \
-    StableDiffusionSafetyChecker
+from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.utils.torch_utils import randn_tensor
 from huggingface_hub import snapshot_download
 from transformers import CLIPImageProcessor
@@ -17,7 +16,7 @@ from transformers import CLIPImageProcessor
 from model.attn_processor import SkipAttnProcessor
 from model.utils import get_trainable_module, init_adapter
 from utils import (compute_vae_encodings, numpy_to_pil, prepare_image,
-                   prepare_mask_image, resize_and_crop, resize_and_padding)
+                    prepare_mask_image, resize_and_crop, resize_and_padding)
 
 
 class CatVTONPipeline:
@@ -26,9 +25,9 @@ class CatVTONPipeline:
         base_ckpt, 
         attn_ckpt, 
         attn_ckpt_version="mix",
-        weight_dtype=torch.float32,
+        weight_dtype=torch.float16,
         device='cuda',
-        compile=False,
+        compile=True,
         skip_safety_check=False,
         use_tf32=True,
     ):
@@ -114,7 +113,7 @@ class CatVTONPipeline:
         image: Union[PIL.Image.Image, torch.Tensor],
         condition_image: Union[PIL.Image.Image, torch.Tensor],
         mask: Union[PIL.Image.Image, torch.Tensor],
-        num_inference_steps: int = 50,
+        num_inference_steps: int = 24,
         guidance_scale: float = 2.5,
         height: int = 1024,
         width: int = 768,
@@ -133,7 +132,7 @@ class CatVTONPipeline:
         # VAE encoding
         masked_latent = compute_vae_encodings(masked_image, self.vae)
         condition_latent = compute_vae_encodings(condition_image, self.vae)
-        mask_latent = torch.nn.functional.interpolate(mask, size=masked_latent.shape[-2:], mode="nearest")
+        mask_latent = torch.nn.functional.interpolate(mask, size=masked_latent.shape[-2:], mode="bilinear")
         del image, mask, condition_image
         # Concatenate latents
         masked_latent_concat = torch.cat([masked_latent, condition_latent], dim=concat_dim)
@@ -237,7 +236,7 @@ class CatVTONPix2PixPipeline(CatVTONPipeline):
         self, 
         image: Union[PIL.Image.Image, torch.Tensor],
         condition_image: Union[PIL.Image.Image, torch.Tensor],
-        num_inference_steps: int = 50,
+        num_inference_steps: int = 24,
         guidance_scale: float = 2.5,
         height: int = 1024,
         width: int = 768,
