@@ -80,6 +80,12 @@ inference_engine = InferenceEngine(
         vae_tiling=cfg.VAE_TILING,
         vae_slicing=cfg.VAE_SLICING,
         vae_tiling_resolution=cfg.VAE_TILING_RESOLUTION,
+        enhance=cfg.ENHANCE,
+        enhance_scale=cfg.ENHANCE_SCALE,
+        enhance_outscale=cfg.ENHANCE_OUTSCALE,
+        enhance_region_only=cfg.ENHANCE_REGION_ONLY,
+        enhance_weight_path=cfg.ENHANCE_WEIGHT_PATH,
+        enhance_tile=cfg.ENHANCE_TILE,
     )
 )
 

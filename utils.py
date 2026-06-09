@@ -95,6 +95,46 @@ def prepare_inpainting_input(
     noisy_latents = torch.cat([noisy_latents, mask_latents, condition_latents], dim=1)
     return noisy_latents
 
+# Mask-weighted diffusion loss
+def compute_mask_weighted_loss(
+    noise_pred: torch.Tensor,
+    noise_target: torch.Tensor,
+    mask_latent: torch.Tensor,
+    mask_weight: float = 5.0,
+) -> torch.Tensor:
+    """
+    Compute MSE diffusion loss with higher weight inside the inpainting mask.
+
+    Pixels inside the mask (where the garment should appear) are weighted
+    `mask_weight` times more than background pixels.  This focuses the model
+    on getting the garment region right.
+
+    Args:
+        noise_pred   : (B, C, H, W) — UNet noise prediction
+        noise_target : (B, C, H, W) — ground-truth noise (epsilon target)
+        mask_latent  : (B, 1, H, W) — binary mask at latent resolution (1=masked)
+        mask_weight  : scalar multiplier for masked pixels (default 5.0)
+
+    Returns:
+        Scalar loss tensor.
+
+    Example::
+
+        loss = compute_mask_weighted_loss(noise_pred, noise, mask_latent, mask_weight=5.0)
+        accelerator.backward(loss)
+    """
+    # Per-pixel squared error: (B, C, H, W)
+    per_pixel_loss = (noise_pred.float() - noise_target.float()) ** 2
+
+    # Build weight map: 1.0 everywhere, mask_weight inside the mask
+    # mask_latent is (B, 1, H, W) — broadcast across channels
+    weight_map = 1.0 + (mask_weight - 1.0) * mask_latent.float()  # (B, 1, H, W)
+
+    # Weighted mean
+    weighted_loss = (per_pixel_loss * weight_map).mean()
+    return weighted_loss
+
+
 # Compute VAE encodings
 def compute_vae_encodings(image: torch.Tensor, vae: torch.nn.Module) -> torch.Tensor:
     """
@@ -179,13 +219,22 @@ def repaint_result(result, person_image, mask_image):
 
 
 def prepare_image(image):
+    """
+    Convert a PIL image, numpy array, or tensor to a (1, 3, H, W) float32 tensor
+    normalized to [-1, 1] (Stable Diffusion expected range).
+
+    Normalization: pixel / 127.5 - 1.0  (equivalent to (pixel - 0.5) / 0.5 on [0,1])
+
+    Input:
+        PIL.Image.Image, np.ndarray (H, W, 3) uint8, or torch.Tensor (3, H, W) or (1, 3, H, W)
+    Output:
+        torch.Tensor (1, 3, H, W) in [-1, 1], float32
+    """
     if isinstance(image, torch.Tensor):
-        # Batch single image
         if image.ndim == 3:
             image = image.unsqueeze(0)
         image = image.to(dtype=torch.float32)
     else:
-        # preprocess image
         if isinstance(image, (PIL.Image.Image, np.ndarray)):
             image = [image]
         if isinstance(image, list) and isinstance(image[0], PIL.Image.Image):
@@ -199,27 +248,29 @@ def prepare_image(image):
 
 
 def prepare_mask_image(mask_image):
+    """
+    Convert a mask (PIL, numpy, or tensor) to a strictly binary (1, 1, H, W) float32 tensor.
+
+    - Values >= 0.5 become 1.0, values < 0.5 become 0.0.
+    - No bilinear interpolation is applied here; resizing should be done
+      separately with mode="nearest" to preserve binary edges.
+
+    Input:
+        PIL.Image.Image (mode "L"), np.ndarray (H, W), or torch.Tensor
+    Output:
+        torch.Tensor (1, 1, H, W) float32, strictly binary {0.0, 1.0}
+    """
     if isinstance(mask_image, torch.Tensor):
         if mask_image.ndim == 2:
-            # Batch and add channel dim for single mask
             mask_image = mask_image.unsqueeze(0).unsqueeze(0)
         elif mask_image.ndim == 3 and mask_image.shape[0] == 1:
-            # Single mask, the 0'th dimension is considered to be
-            # the existing batch size of 1
             mask_image = mask_image.unsqueeze(0)
         elif mask_image.ndim == 3 and mask_image.shape[0] != 1:
-            # Batch of mask, the 0'th dimension is considered to be
-            # the batching dimension
             mask_image = mask_image.unsqueeze(1)
-
-        # Binarize mask
-        mask_image[mask_image < 0.5] = 0
-        mask_image[mask_image >= 0.5] = 1
+        mask_image = mask_image.to(dtype=torch.float32)
     else:
-        # preprocess mask
         if isinstance(mask_image, (PIL.Image.Image, np.ndarray)):
             mask_image = [mask_image]
-
         if isinstance(mask_image, list) and isinstance(mask_image[0], PIL.Image.Image):
             mask_image = np.concatenate(
                 [np.array(m.convert("L"))[None, None, :] for m in mask_image], axis=0
@@ -227,11 +278,11 @@ def prepare_mask_image(mask_image):
             mask_image = mask_image.astype(np.float32) / 255.0
         elif isinstance(mask_image, list) and isinstance(mask_image[0], np.ndarray):
             mask_image = np.concatenate([m[None, None, :] for m in mask_image], axis=0)
+            mask_image = mask_image.astype(np.float32)
+        mask_image = torch.from_numpy(mask_image).to(dtype=torch.float32)
 
-        mask_image[mask_image < 0.5] = 0
-        mask_image[mask_image >= 0.5] = 1
-        mask_image = torch.from_numpy(mask_image)
-
+    # Binarize strictly
+    mask_image = (mask_image >= 0.5).float()
     return mask_image
 
 
@@ -347,36 +398,174 @@ def is_xformers_available():
 
 
 
-def resize_and_crop(image, size):
-    # Crop to size ratio
+def center_garment(image: Image.Image, background_threshold: int = 240) -> Image.Image:
+    """
+    Auto-center a garment image by detecting the non-background bounding box
+    and centering the garment content within the frame.
+
+    If the garment already occupies most of the frame (>80% area), returns as-is.
+    Background is detected as pixels where all RGB channels exceed `background_threshold`.
+
+    Args:
+        image: PIL RGB garment image.
+        background_threshold: pixel value above which a pixel is considered background.
+
+    Returns:
+        PIL Image with garment centered in the original frame size.
+    """
+    img_arr = np.array(image)
+    # Detect non-background pixels (not near-white)
+    non_bg_mask = np.any(img_arr < background_threshold, axis=2)
+
+    if not non_bg_mask.any():
+        # Entirely background — return as-is
+        return image
+
+    # Find bounding box of non-background region
+    rows = np.where(non_bg_mask.any(axis=1))[0]
+    cols = np.where(non_bg_mask.any(axis=0))[0]
+    top, bottom = rows[0], rows[-1] + 1
+    left, right = cols[0], cols[-1] + 1
+
+    content_h = bottom - top
+    content_w = right - left
+    img_h, img_w = img_arr.shape[:2]
+
+    # If content already fills >80% of the frame, skip centering
+    content_area_ratio = (content_h * content_w) / (img_h * img_w)
+    if content_area_ratio > 0.80:
+        return image
+
+    # Crop to content, then paste centered on white canvas
+    content = image.crop((left, top, right, bottom))
+    centered = Image.new("RGB", (img_w, img_h), (255, 255, 255))
+    paste_x = (img_w - content_w) // 2
+    paste_y = (img_h - content_h) // 2
+    centered.paste(content, (paste_x, paste_y))
+    return centered
+
+
+def preprocess_inputs(
+    image: "PIL.Image.Image",
+    garment: "PIL.Image.Image",
+    mask: "PIL.Image.Image",
+    height: int,
+    width: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, "PIL.Image.Image"]:
+    """
+    Unified preprocessing for the CatVTON pipeline.
+
+    Steps:
+      1. Person image: resize with center crop to (width, height).
+      2. Garment image: center the garment, then resize with padding (letterbox).
+      3. Mask: resize EXACTLY like person image (center crop), using NEAREST interpolation.
+      4. Normalize person + garment to [-1, 1] (SD expected range).
+      5. Mask stays binary float32 {0.0, 1.0}.
+
+    Args:
+        image:   PIL RGB person image.
+        garment: PIL RGB garment image.
+        mask:    PIL "L" or "RGB" mask (white = inpaint region).
+        height:  Target height in pixels.
+        width:   Target width in pixels.
+
+    Returns:
+        image_tensor:   (1, 3, H, W) float32 in [-1, 1]
+        garment_tensor: (1, 3, H, W) float32 in [-1, 1]
+        mask_tensor:    (1, 1, H, W) float32 binary {0, 1}
+        garment_pil:    Resized garment as PIL (for CLIP encoding)
+    """
+    # ── 1. Person image: center crop to target ───────────────────────────────
+    image = resize_and_crop(image, (width, height))
+
+    # ── 2. Garment: center content, then letterbox pad ───────────────────────
+    garment = center_garment(garment)
+    garment = resize_and_padding(garment, (width, height))
+    garment_pil = garment.copy()  # Keep PIL copy for CLIP before tensor conversion
+
+    # ── 3. Mask: resize exactly like person (center crop + nearest) ──────────
+    if mask.mode != "L":
+        mask = mask.convert("L")
+    mask = resize_and_crop(mask, (width, height), resample=Image.NEAREST)
+
+    # ── 4. Convert to tensors ────────────────────────────────────────────────
+    # Person + garment: normalized to [-1, 1]
+    image_tensor = prepare_image(image)      # (1, 3, H, W)
+    garment_tensor = prepare_image(garment)  # (1, 3, H, W)
+
+    # Mask: binary float32
+    mask_tensor = prepare_mask_image(mask)   # (1, 1, H, W)
+
+    return image_tensor, garment_tensor, mask_tensor, garment_pil
+
+
+def resize_and_crop(image, size, resample=Image.LANCZOS):
+    """
+    Resize a PIL image to `size` (width, height) using center crop.
+
+    Strategy:
+      1. Compute the crop region that matches the target aspect ratio.
+      2. Center-crop to that region.
+      3. Resize to the exact target dimensions.
+
+    This preserves aspect ratio before the final resize, avoiding distortion.
+
+    Args:
+        image: PIL Image (any mode).
+        size: (width, height) target size.
+        resample: PIL resampling filter. Use Image.NEAREST for masks,
+                  Image.LANCZOS for RGB images.
+    """
     w, h = image.size
     target_w, target_h = size
-    if w / h < target_w / target_h:
-        new_w = w
-        new_h = w * target_h // target_w
-    else:
+    target_ratio = target_w / target_h
+    image_ratio = w / h
+
+    if image_ratio > target_ratio:
+        # Image is wider — crop width
+        new_w = int(h * target_ratio)
         new_h = h
-        new_w = h * target_w // target_h
-    image = image.crop(
-        ((w - new_w) // 2, (h - new_h) // 2, (w + new_w) // 2, (h + new_h) // 2)
-    )
-    # resize
-    image = image.resize(size, Image.LANCZOS)
+    else:
+        # Image is taller — crop height
+        new_w = w
+        new_h = int(w / target_ratio)
+
+    # Center crop
+    left = (w - new_w) // 2
+    top = (h - new_h) // 2
+    image = image.crop((left, top, left + new_w, top + new_h))
+    # Resize to exact target
+    image = image.resize(size, resample)
     return image
 
 
 def resize_and_padding(image, size):
-    # Padding to size ratio
+    """
+    Resize a PIL image to fit within `size` (width, height) with letterbox padding.
+
+    Strategy:
+      1. Scale the image so it fits entirely within the target dimensions.
+      2. Pad the remaining space with white (255, 255, 255).
+      3. The image is centered within the padded frame.
+
+    This keeps the full garment visible without cropping.
+    """
     w, h = image.size
     target_w, target_h = size
-    if w / h < target_w / target_h:
-        new_h = target_h
-        new_w = w * target_h // h
-    else:
+    target_ratio = target_w / target_h
+    image_ratio = w / h
+
+    if image_ratio > target_ratio:
+        # Image is wider — fit to width
         new_w = target_w
-        new_h = h * target_w // w
+        new_h = int(target_w / image_ratio)
+    else:
+        # Image is taller — fit to height
+        new_h = target_h
+        new_w = int(target_h * image_ratio)
+
     image = image.resize((new_w, new_h), Image.LANCZOS)
-    # padding
+    # Center on white canvas
     padding = Image.new("RGB", size, (255, 255, 255))
     padding.paste(image, ((target_w - new_w) // 2, (target_h - new_h) // 2))
     return padding

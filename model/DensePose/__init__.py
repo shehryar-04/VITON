@@ -102,6 +102,70 @@ class DensePose:
         result = Image.fromarray(result)
         result.save(context["out_fname"])
 
+    def execute_on_outputs_iuv(self, entry, outputs):
+        """
+        Extract raw IUV maps from a DensePose prediction.
+
+        Returns:
+            np.ndarray of shape (H, W, 3) float32.
+            Channel 0 = I  — raw body-part index as float32, integer values in [0, 24].
+                             Background pixels = 0.
+            Channel 1 = U  — surface U coordinate in [0, 1].
+            Channel 2 = V  — surface V coordinate in [0, 1].
+
+        Note: Channel 0 is intentionally kept as a raw integer index (cast to
+        float32) so that call_iuv() can apply one-hot encoding without
+        precision loss from normalisation.
+        """
+        from densepose.vis.extractor import DensePoseResultExtractor
+        extractor = DensePoseResultExtractor()
+        instances = outputs
+
+        H, W, _ = entry["image"].shape
+        iuv = np.zeros((H, W, 3), dtype=np.float32)
+
+        if not instances.has("pred_densepose"):
+            return iuv
+
+        results = extractor(instances)
+        if results is None or len(results) == 0:
+            return iuv
+
+        data, boxes = results[0]
+        # data[0] is a DensePoseChartResult with .labels, .uv
+        dp_result = data[0]
+        box = boxes[0]
+        x1, y1, x2, y2 = [int(v) for v in box.cpu().numpy()]
+        bh, bw = y2 - y1, x2 - x1
+
+        # labels: (H_box, W_box) — body part index 0..24 (uint8 on GPU)
+        labels = dp_result.labels.cpu().numpy().astype(np.float32)  # (H_box, W_box)
+        # uv: (2, H_box, W_box) float32 in [0, 1]
+        uv = dp_result.uv.cpu().numpy()  # (2, H_box, W_box)
+
+        # Resize box outputs to (bh, bw) if needed
+        if labels.shape != (bh, bw):
+            labels = cv2.resize(labels, (bw, bh), interpolation=cv2.INTER_NEAREST)
+            u_ch = cv2.resize(uv[0], (bw, bh), interpolation=cv2.INTER_LINEAR)
+            v_ch = cv2.resize(uv[1], (bw, bh), interpolation=cv2.INTER_LINEAR)
+        else:
+            u_ch = uv[0]
+            v_ch = uv[1]
+
+        # Clip box to image bounds
+        x1c, y1c = max(x1, 0), max(y1, 0)
+        x2c, y2c = min(x2, W), min(y2, H)
+        ox1, oy1 = x1c - x1, y1c - y1
+        ox2, oy2 = ox1 + (x2c - x1c), oy1 + (y2c - y1c)
+
+        # Store raw integer index in channel 0 (NOT normalised — one-hot is
+        # applied later in call_iuv() to avoid float precision issues)
+        iuv[y1c:y2c, x1c:x2c, 0] = labels[oy1:oy2, ox1:ox2]   # raw index 0..24
+        iuv[y1c:y2c, x1c:x2c, 1] = u_ch[oy1:oy2, ox1:ox2]
+        iuv[y1c:y2c, x1c:x2c, 2] = v_ch[oy1:oy2, ox1:ox2]
+
+        return iuv
+
     def __call__(self, image_or_path, resize=512) -> Image.Image:
         """
         :param image_or_path: Path of the input image.
@@ -152,6 +216,92 @@ class DensePose:
 
 
         return dense_gray
+
+    def call_iuv(self, image_or_path, resize: int = 512) -> np.ndarray:
+        """
+        Run DensePose and return a one-hot-encoded IUV tensor as float32.
+
+        The I channel (body-part index 0..24) is expanded into 24 one-hot
+        channels using torch.nn.functional.one_hot, then concatenated with
+        the U and V channels.
+
+        Args:
+            image_or_path: PIL.Image.Image or file path string.
+            resize (int): Resize longest side to this before inference.
+
+        Returns:
+            np.ndarray shape (H, W, 26) float32.
+            Channels  0..23 = one-hot encoding of body-part index (24 classes).
+            Channel  24     = U surface coordinate in [0, 1].
+            Channel  25     = V surface coordinate in [0, 1].
+            Background pixels = 0 in all channels.
+
+        Channel count: 24 (one-hot I) + 1 (U) + 1 (V) = 26.
+        """
+        tmp_dir = "./densepose_/tmp/"
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        image_path = os.path.join(tmp_dir, f"{int(time.time())}-{self.device}-{randint(0, 100000)}.png")
+        if isinstance(image_or_path, str):
+            assert image_or_path.split(".")[-1].lower() in ("jpg", "jpeg", "png")
+            shutil.copy(image_or_path, image_path)
+        elif isinstance(image_or_path, Image.Image):
+            image_or_path.save(image_path)
+        else:
+            raise TypeError("image_or_path must be str or PIL.Image.Image")
+
+        orig_w, orig_h = Image.open(image_path).size
+
+        img = read_image(image_path, format="BGR")
+        if (_ := max(img.shape)) > resize:
+            scale = resize / _
+            img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
+
+        with torch.no_grad():
+            outputs = self.predictor(img)["instances"]
+
+        try:
+            # raw_iuv: (H_inf, W_inf, 3) — channel 0 is raw integer index 0..24
+            raw_iuv = self.execute_on_outputs_iuv({"image": img}, outputs)
+        except Exception:
+            raw_iuv = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.float32)
+
+        # ── Resize to original image dimensions ─────────────────────────
+        inf_h, inf_w = raw_iuv.shape[:2]
+        if (inf_h, inf_w) != (orig_h, orig_w):
+            # I channel: nearest-neighbour to preserve integer indices
+            i_resized = cv2.resize(
+                raw_iuv[:, :, 0], (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
+            )
+            # U, V channels: bilinear
+            u_resized = cv2.resize(
+                raw_iuv[:, :, 1], (orig_w, orig_h), interpolation=cv2.INTER_LINEAR
+            )
+            v_resized = cv2.resize(
+                raw_iuv[:, :, 2], (orig_w, orig_h), interpolation=cv2.INTER_LINEAR
+            )
+        else:
+            i_resized = raw_iuv[:, :, 0]
+            u_resized = raw_iuv[:, :, 1]
+            v_resized = raw_iuv[:, :, 2]
+
+        # ── One-hot encode I channel (24 classes, indices 0..23) ─────────
+        # DensePose labels: 0 = background, 1..24 = body parts.
+        # We clamp to [0, 23] so index 24 maps to class 23 (rare edge case).
+        i_int = torch.from_numpy(i_resized).long().clamp(0, 23)  # (H, W)
+
+        # torch.nn.functional.one_hot: (H, W) → (H, W, 24), no loops
+        i_onehot = torch.nn.functional.one_hot(i_int, num_classes=24)  # (H, W, 24)
+        i_onehot = i_onehot.float()                                      # float32
+
+        # ── Concatenate: [one-hot I (24), U (1), V (1)] → (H, W, 26) ────
+        u_tensor = torch.from_numpy(u_resized).unsqueeze(-1)  # (H, W, 1)
+        v_tensor = torch.from_numpy(v_resized).unsqueeze(-1)  # (H, W, 1)
+
+        iuv26 = torch.cat([i_onehot, u_tensor, v_tensor], dim=-1)  # (H, W, 26)
+
+        os.remove(image_path)
+        return iuv26.numpy()  # (H, W, 26) float32
 
 
 if __name__ == '__main__':

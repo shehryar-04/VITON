@@ -1,11 +1,11 @@
 import os
 import json
 import torch
-from model.attn_processor import AttnProcessor2_0, SkipAttnProcessor 
+from model.attn_processor import AttnProcessor2_0
 
 
 def init_adapter(unet, 
-                 cross_attn_cls=SkipAttnProcessor,
+                 cross_attn_cls=AttnProcessor2_0,
                  self_attn_cls=None,
                  cross_attn_dim=None, 
                  **kwargs):

@@ -45,3 +45,11 @@ class InferenceConfig:
     vae_tiling: bool            # default True
     vae_slicing: bool           # default True
     vae_tiling_resolution: int  # default 1024 — enable tiling above this px
+
+    # --- Real-ESRGAN post-processing (texture / fold enhancement) ---
+    enhance: bool = False                  # enable Real-ESRGAN enhancement
+    enhance_scale: int = 4                 # model upscale factor (2 or 4)
+    enhance_outscale: float = 1.0          # final output scale vs. try-on result
+    enhance_region_only: bool = True       # enhance only the garment (masked) region
+    enhance_weight_path: str = ""          # local .pth path; empty = download official
+    enhance_tile: int = 512                # tile size for tiled inference (0 = off)

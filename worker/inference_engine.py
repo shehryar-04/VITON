@@ -37,6 +37,7 @@ class InferenceEngine:
         self.config = config
         self.pipeline = self._load_pipeline(config)
         self.auto_masker = self._load_auto_masker(config)
+        self.enhancer = self._load_enhancer(config)
 
     # ------------------------------------------------------------------
     # Initialisation helpers
@@ -97,6 +98,29 @@ class InferenceEngine:
             logger.warning("AutoMasker could not be loaded (%s) — blank mask fallback", exc)
             return None
 
+    def _load_enhancer(self, config: InferenceConfig):
+        """Load the Real-ESRGAN enhancer if enabled in config."""
+        if not config.enhance:
+            return None
+        try:
+            from model.enhancer import RealESRGANEnhancer
+            enhancer = RealESRGANEnhancer(
+                scale=config.enhance_scale,
+                device=config.device,
+                weight_path=config.enhance_weight_path or None,
+                half=True,
+                tile=config.enhance_tile,
+                tile_pad=32,
+            )
+            logger.info(
+                "Real-ESRGAN enhancer loaded (scale=x%d, region_only=%s)",
+                config.enhance_scale, config.enhance_region_only,
+            )
+            return enhancer
+        except Exception as exc:
+            logger.warning("Real-ESRGAN enhancer could not be loaded (%s) — skipping", exc)
+            return None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -120,7 +144,8 @@ class InferenceEngine:
             cloth_image = _download_image(job.cloth_image_url)
             mask = self._get_or_generate_mask(job, user_image)
             output_images = self.pipeline(image=user_image, condition_image=cloth_image, mask=mask)
-            return InferenceResult(job_id=job.id, image=output_images[0], error=None)
+            result_image = self._maybe_enhance(output_images[0], mask)
+            return InferenceResult(job_id=job.id, image=result_image, error=None)
         except Exception as exc:
             logger.exception("CatVTON inference failed for job %s", job.id)
             return InferenceResult(job_id=job.id, image=None, error=str(exc))
@@ -147,6 +172,7 @@ class InferenceEngine:
         try:
             output = self._flux_infer(user_image, cloth_image, mask)
             image = output.images[0] if hasattr(output, "images") else output[0]
+            image = self._maybe_enhance(image, mask)
             return InferenceResult(job_id=job.id, image=image, error=None)
         except Exception as exc:
             logger.exception("Flux inference failed for job %s", job.id)
@@ -164,6 +190,37 @@ class InferenceEngine:
                 finally:
                     self.pipeline.enable_vae_tiling()
             raise
+
+    # ------------------------------------------------------------------
+    # Enhancement helper (Real-ESRGAN)
+    # ------------------------------------------------------------------
+
+    def _maybe_enhance(self, image: Image.Image, mask: Optional[Image.Image]) -> Image.Image:
+        """
+        Apply Real-ESRGAN enhancement to the try-on result if enabled.
+
+        When `enhance_region_only` is True and a mask is available, only the
+        garment region is enhanced and composited back — this sharpens cloth
+        textures and folds without altering the face or background.
+        """
+        if self.enhancer is None:
+            return image
+        try:
+            if self.config.enhance_region_only and mask is not None:
+                # Mask is at the person's original resolution; resize to the
+                # result resolution so the composite aligns correctly.
+                m = mask.convert("L")
+                if m.size != image.size:
+                    m = m.resize(image.size, Image.NEAREST)
+                return self.enhancer.enhance_region(
+                    image, m, outscale=self.config.enhance_outscale,
+                )
+            return self.enhancer.enhance(
+                image, outscale=self.config.enhance_outscale,
+            )
+        except Exception as exc:
+            logger.warning("Enhancement failed (%s) — returning un-enhanced result", exc)
+            return image
 
     # ------------------------------------------------------------------
     # Mask helpers

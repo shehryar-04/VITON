@@ -21,3 +21,4 @@ av==12.3.0
 gradio==4.41.0
 peft==0.14.0
 huggingface_hub==0.34.0
+
