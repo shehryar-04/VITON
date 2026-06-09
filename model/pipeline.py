@@ -278,6 +278,12 @@ class CatVTONPipeline:
         # Concatenate latents
         masked_latent_concat = torch.cat([masked_latent, condition_latent], dim=concat_dim)
         mask_latent_concat = torch.cat([mask_latent, torch.zeros_like(mask_latent)], dim=concat_dim)
+
+        # Tile the IUV latent along the concat dim so its spatial size matches the
+        # doubled person|garment latents (same as training in train.py). Without
+        # this, the channel-wise torch.cat below fails with a height mismatch.
+        iuv_latent = torch.cat([iuv_latent, torch.zeros_like(iuv_latent)], dim=concat_dim)
+
         # Prepare noise
         latents = randn_tensor(
             masked_latent_concat.shape,
