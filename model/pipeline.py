@@ -286,18 +286,26 @@ class CatVTONPipeline:
         # Encode IUV map to latent-resolution feature tensor and concatenate
         # to the UNet input along the channel dimension (dim=1).
         # iuv_latent shape: (1, IUV_LATENT_CHANNELS, H/8, W/8)
-        if self.use_iuv_conditioning and iuv_map is not None:
-            iuv_latent = prepare_iuv_latent(
-                iuv_map, height, width,
-                self.iuv_encoder, self.device, self.weight_dtype,
-            )
+        #
+        # NOTE: conv_in is only widened (+IUV_LATENT_CHANNELS) when
+        # use_iuv_conditioning is True. When IUV is disabled, conv_in keeps its
+        # original 9 input channels, so the IUV latent must NOT be appended —
+        # otherwise the UNet receives 17 channels and conv_in fails.
+        if self.use_iuv_conditioning:
+            if iuv_map is not None:
+                iuv_latent = prepare_iuv_latent(
+                    iuv_map, height, width,
+                    self.iuv_encoder, self.device, self.weight_dtype,
+                )
+            else:
+                # Zero tensor — IUV head enabled but no map supplied this call
+                iuv_latent = torch.zeros(
+                    1, IUV_LATENT_CHANNELS,
+                    masked_latent.shape[-2], masked_latent.shape[-1],
+                    device=self.device, dtype=self.weight_dtype,
+                )
         else:
-            # Zero tensor — no IUV conditioning (backward-compatible)
-            iuv_latent = torch.zeros(
-                1, IUV_LATENT_CHANNELS,
-                masked_latent.shape[-2], masked_latent.shape[-1],
-                device=self.device, dtype=self.weight_dtype,
-            )
+            iuv_latent = None
 
         # Concatenate latents
         masked_latent_concat = torch.cat([masked_latent, condition_latent], dim=concat_dim)
@@ -306,7 +314,8 @@ class CatVTONPipeline:
         # Tile the IUV latent along the concat dim so its spatial size matches the
         # doubled person|garment latents (same as training in train.py). Without
         # this, the channel-wise torch.cat below fails with a height mismatch.
-        iuv_latent = torch.cat([iuv_latent, torch.zeros_like(iuv_latent)], dim=concat_dim)
+        if iuv_latent is not None:
+            iuv_latent = torch.cat([iuv_latent, torch.zeros_like(iuv_latent)], dim=concat_dim)
 
         # Prepare noise
         latents = randn_tensor(
@@ -329,7 +338,10 @@ class CatVTONPipeline:
             )
             mask_latent_concat = torch.cat([mask_latent_concat] * 2)
             # Duplicate IUV latent for CFG (unconditional uses zeros)
-            iuv_latent_cfg = torch.cat([torch.zeros_like(iuv_latent), iuv_latent], dim=0)
+            iuv_latent_cfg = (
+                torch.cat([torch.zeros_like(iuv_latent), iuv_latent], dim=0)
+                if iuv_latent is not None else None
+            )
         else:
             iuv_latent_cfg = iuv_latent
 
@@ -348,11 +360,12 @@ class CatVTONPipeline:
                 non_inpainting_latent_model_input = self.noise_scheduler.scale_model_input(non_inpainting_latent_model_input, t)
                 # prepare the input for the inpainting model
                 # Standard channels: [noisy_latent(4), mask(1), masked_image(4)] = 9 channels
-                # + IUV channels: IUV_LATENT_CHANNELS extra channels
-                inpainting_latent_model_input = torch.cat(
-                    [non_inpainting_latent_model_input, mask_latent_concat, masked_latent_concat, iuv_latent_cfg],
-                    dim=1,
-                )
+                # + IUV channels (IUV_LATENT_CHANNELS) only when IUV conditioning
+                #   is enabled and conv_in has been widened to match.
+                concat_parts = [non_inpainting_latent_model_input, mask_latent_concat, masked_latent_concat]
+                if iuv_latent_cfg is not None:
+                    concat_parts.append(iuv_latent_cfg)
+                inpainting_latent_model_input = torch.cat(concat_parts, dim=1)
                 # predict the noise residual
                 noise_pred= self.unet(
                     inpainting_latent_model_input,
