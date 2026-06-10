@@ -51,6 +51,17 @@ class InferenceConfig:
     guidance_scale: float = 2.5            # CFG scale; CatVTON works best around 2.5
     use_clip_cross_attn: bool = False      # legacy CLIP image cross-attention (off = official CatVTON)
 
+    # --- Flux try-on pipeline (FLUX.1-Fill-dev based) ---
+    flux_base_ckpt: str = "black-forest-labs/FLUX.1-Fill-dev"  # gated HF repo (needs token)
+    flux_lora_path: str = ""               # optional try-on LoRA (base + LoRA); empty = merged model
+    flux_quantize_4bit: bool = True        # NF4 4-bit transformer — required for <12GB VRAM
+    flux_vae_fp32: bool = True             # run VAE in fp32 (T4/fp16 safety against black images)
+    flux_cpu_offload: str = "model"        # "model" | "sequential" | "none"
+    flux_height: int = 1024                # portrait try-on height (divisible by 16)
+    flux_width: int = 768                  # portrait try-on width (divisible by 16)
+    flux_num_inference_steps: int = 30     # Flux Fill steps
+    flux_guidance_scale: float = 30.0      # Flux Fill distilled guidance (~30 for try-on)
+
     # --- Real-ESRGAN post-processing (texture / fold enhancement) ---
     enhance: bool = False                  # enable Real-ESRGAN enhancement
     enhance_scale: int = 4                 # model upscale factor (2 or 4)

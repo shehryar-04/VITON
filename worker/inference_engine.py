@@ -69,19 +69,129 @@ class InferenceEngine:
         return pipeline
 
     def _load_flux(self, config: InferenceConfig, cfg):
+        import torch
         from model.flux.pipeline_flux_tryon import FluxTryOnPipeline
-        pipeline = FluxTryOnPipeline.from_pretrained(cfg.FLUX_CKPT)
+
         try:
             import flash_attn  # noqa: F401
             logger.info("flash-attn package found — PyTorch SDPA will use flash attention kernels")
         except (ImportError, ModuleNotFoundError):
             logger.info("flash-attn not installed — continuing with PyTorch SDPA default")
+
+        pipeline = self._build_flux_pipeline(config, cfg, FluxTryOnPipeline, torch)
+
         if config.vae_tiling:
             pipeline.enable_vae_tiling()
             logger.info("VAE tiling enabled (threshold: %d px)", config.vae_tiling_resolution)
         if config.vae_slicing and config.batch_size > 1:
             pipeline.enable_vae_slicing()
             logger.info("VAE slicing enabled (batch_size=%d)", config.batch_size)
+
+        return pipeline
+
+    @staticmethod
+    def _flux_compute_dtype(torch, device):
+        """
+        Pick the transformer/VAE compute dtype based on GPU capability.
+
+        Turing GPUs (Tesla T4) have no bf16 tensor cores, so bf16 falls back to
+        slow emulation; use fp16 there. Ampere and newer (A10G, A100, RTX 30/40)
+        support bf16 natively, which is more numerically robust for Flux.
+        """
+        try:
+            if (
+                "cuda" in str(device)
+                and torch.cuda.is_available()
+                and torch.cuda.is_bf16_supported()
+            ):
+                return torch.bfloat16
+        except Exception:
+            pass
+        return torch.float16
+
+    def _build_flux_pipeline(self, config: InferenceConfig, cfg, FluxTryOnPipeline, torch):
+        """
+        Build the Flux try-on pipeline for low-VRAM (<12GB) deployment.
+
+        FLUX.1-Fill-dev is a 12B model (~24GB bf16). To fit under 12GB we load the
+        transformer with NF4 4-bit quantization (~6.5-7GB) and offload the rest to
+        CPU. The 16-channel Flux VAE is kept in bf16 (not quantized) since it is
+        the component most responsible for preserving garment texture.
+        """
+        from diffusers import AutoencoderKL
+        from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+        from model.flux.transformer_flux import FluxTransformer2DModel
+
+        base = cfg.FLUX_BASE_CKPT or cfg.FLUX_CKPT
+        if not base:
+            raise ValueError(
+                "Flux pipeline selected but no base checkpoint configured. "
+                "Set FLUX_BASE_CKPT (e.g. 'black-forest-labs/FLUX.1-Fill-dev')."
+            )
+
+        # Compute dtype is hardware-dependent:
+        #   - Turing (Tesla T4): NO bf16 hardware → must use fp16.
+        #   - Ampere+ (A10G):    native bf16 → use bf16 (more numerically robust).
+        # The Flux VAE can emit NaNs/black images in fp16; the AutoencoderKL
+        # `force_upcast` config upcasts its internals to fp32 to avoid this. If
+        # you still see black outputs on T4, run the VAE in fp32 (see notes).
+        compute_dtype = self._flux_compute_dtype(torch, config.device)
+        logger.info("Flux compute dtype: %s", compute_dtype)
+
+        quant_config = None
+        if config.flux_quantize_4bit:
+            try:
+                from diffusers import BitsAndBytesConfig
+                quant_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=compute_dtype,
+                )
+                logger.info("Flux transformer: NF4 4-bit quantization enabled")
+            except (ImportError, ModuleNotFoundError):
+                logger.warning(
+                    "bitsandbytes/diffusers BitsAndBytesConfig unavailable — loading Flux "
+                    "transformer in %s. The full 12B model needs ~24GB; expect OOM on a T4.",
+                    compute_dtype,
+                )
+
+        transformer_kwargs = {"subfolder": "transformer", "torch_dtype": compute_dtype}
+        if quant_config is not None:
+            transformer_kwargs["quantization_config"] = quant_config
+
+        transformer = FluxTransformer2DModel.from_pretrained(base, **transformer_kwargs)
+        transformer.remove_text_layers()  # try-on uses no text conditioning
+        # VAE precision: fp32 by default for T4/fp16 numerical safety (avoids
+        # NaN/black decodes). The pipeline casts tensors at the VAE boundary so
+        # a VAE dtype differing from the transformer dtype works correctly.
+        vae_dtype = torch.float32 if config.flux_vae_fp32 else compute_dtype
+        vae = AutoencoderKL.from_pretrained(base, subfolder="vae", torch_dtype=vae_dtype)
+        logger.info("Flux VAE dtype: %s", vae_dtype)
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(base, subfolder="scheduler")
+
+        pipeline = FluxTryOnPipeline(vae, scheduler, transformer)
+
+        # Apply the try-on LoRA on top of the base Fill model, if provided.
+        if config.flux_lora_path:
+            pipeline.load_lora_weights(config.flux_lora_path)
+            logger.info("Flux try-on LoRA loaded from %s", config.flux_lora_path)
+
+        # Placement / offload. A 4-bit quantized transformer is pinned to GPU by
+        # bitsandbytes and must not be moved by model-offload hooks, so we place
+        # the pipeline on-device directly. Non-quantized loads use offload.
+        if quant_config is not None:
+            pipeline.to(config.device)
+            logger.info("Flux pipeline placed on %s (4-bit transformer pinned to GPU)", config.device)
+        elif config.flux_cpu_offload == "sequential":
+            pipeline.enable_sequential_cpu_offload(device=config.device)
+            logger.info("Flux sequential CPU offload enabled (slow, fits <8GB)")
+        elif config.flux_cpu_offload == "model":
+            pipeline.enable_model_cpu_offload(device=config.device)
+            logger.info("Flux model CPU offload enabled")
+        else:
+            pipeline.to(config.device)
+            logger.info("Flux pipeline placed on %s (no offload)", config.device)
+
         return pipeline
 
     def _load_auto_masker(self, config: InferenceConfig):
@@ -186,14 +296,23 @@ class InferenceEngine:
             return InferenceResult(job_id=job.id, image=None, error=str(exc))
 
     def _flux_infer(self, user_image, cloth_image, mask):
+        flux_kwargs = dict(
+            image=user_image,
+            condition_image=cloth_image,
+            mask_image=mask,
+            height=self.config.flux_height,
+            width=self.config.flux_width,
+            num_inference_steps=self.config.flux_num_inference_steps,
+            guidance_scale=self.config.flux_guidance_scale,
+        )
         try:
-            return self.pipeline(image=user_image, condition_image=cloth_image, mask_image=mask)
+            return self.pipeline(**flux_kwargs)
         except RuntimeError as exc:
             if self.config.vae_tiling:
                 logger.warning("VAE RuntimeError with tiling — disabling and retrying: %s", exc)
                 self.pipeline.disable_vae_tiling()
                 try:
-                    return self.pipeline(image=user_image, condition_image=cloth_image, mask_image=mask)
+                    return self.pipeline(**flux_kwargs)
                 finally:
                     self.pipeline.enable_vae_tiling()
             raise

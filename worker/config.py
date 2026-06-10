@@ -111,6 +111,22 @@ ATTN_CKPT_VERSION: str = _get_str("ATTN_CKPT_VERSION", "mix")
 # Flux checkpoint path (optional — empty string if not set)
 FLUX_CKPT: str = _get_str("FLUX_CKPT", "")
 
+# Flux try-on pipeline (FLUX.1-Fill-dev based). Requires a gated HF token for the
+# base model. NF4 4-bit quantization is required to fit a 12B model under 12GB VRAM.
+FLUX_BASE_CKPT: str = _get_str("FLUX_BASE_CKPT", "black-forest-labs/FLUX.1-Fill-dev")
+FLUX_LORA_PATH: str = _get_str("FLUX_LORA_PATH", "")
+FLUX_QUANTIZE_4BIT: bool = _get_bool("FLUX_QUANTIZE_4BIT", "true")
+# Run the VAE in fp32. The Flux VAE is prone to NaN/black images in fp16 (the
+# T4 compute dtype), so default to fp32 — it is small (~0.7GB) and fits easily.
+FLUX_VAE_FP32: bool = _get_bool("FLUX_VAE_FP32", "true")
+# Offload strategy: "model" (per-module, fits ~12GB), "sequential" (per-submodule,
+# fits <8GB but very slow), or "none" (everything on GPU — needs ample VRAM).
+FLUX_CPU_OFFLOAD: str = _get_str("FLUX_CPU_OFFLOAD", "model")
+FLUX_HEIGHT: int = _get_int("FLUX_HEIGHT", "1024")
+FLUX_WIDTH: int = _get_int("FLUX_WIDTH", "768")
+FLUX_NUM_INFERENCE_STEPS: int = _get_int("FLUX_NUM_INFERENCE_STEPS", "30")
+FLUX_GUIDANCE_SCALE: float = float(_get_str("FLUX_GUIDANCE_SCALE", "30.0"))
+
 # AutoMasker checkpoint paths (optional — empty string if not set)
 DENSEPOSE_CKPT: str = _get_str("DENSEPOSE_CKPT", "")
 SCHP_CKPT: str = _get_str("SCHP_CKPT", "")

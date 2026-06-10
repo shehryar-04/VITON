@@ -98,7 +98,11 @@ class FluxTryOnPipeline(
         if masked_image.shape[1] == num_channels_latents:
             masked_image_latents = masked_image
         else:
-            masked_image_latents = retrieve_latents(self.vae.encode(masked_image), generator=generator)
+            # Cast to the VAE dtype: the VAE may run in fp32 (e.g. on T4) while
+            # the transformer/latents are fp16. Output is cast back to `dtype` below.
+            masked_image_latents = retrieve_latents(
+                self.vae.encode(masked_image.to(self.vae.dtype)), generator=generator
+            )
 
         masked_image_latents = (masked_image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         masked_image_latents = masked_image_latents.to(device=device, dtype=dtype)
@@ -487,7 +491,8 @@ class FluxTryOnPipeline(
             latents = self._unpack_latents(latents, height, width * 2, self.vae_scale_factor) # TryOnEdit: width * 2
             latents = latents.split(latents.shape[-1] // 2, dim=-1)[0]  # TryOnEdit: split along the last dimension
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-            image = self.vae.decode(latents, return_dict=False)[0]
+            # Cast to VAE dtype (VAE may be fp32 while latents are fp16, e.g. on T4)
+            image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         # Offload all models
