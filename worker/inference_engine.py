@@ -59,6 +59,7 @@ class InferenceEngine:
             attn_ckpt=cfg.ATTN_CKPT,
             attn_ckpt_version=cfg.ATTN_CKPT_VERSION,
             device=config.device,
+            use_clip_cross_attn=config.use_clip_cross_attn,
         )
         try:
             pipeline.unet.enable_xformers_memory_efficient_attention()
@@ -143,7 +144,13 @@ class InferenceEngine:
             user_image = _download_image(job.user_image_url)
             cloth_image = _download_image(job.cloth_image_url)
             mask = self._get_or_generate_mask(job, user_image)
-            output_images = self.pipeline(image=user_image, condition_image=cloth_image, mask=mask)
+            output_images = self.pipeline(
+                image=user_image,
+                condition_image=cloth_image,
+                mask=mask,
+                num_inference_steps=self.config.num_inference_steps,
+                guidance_scale=self.config.guidance_scale,
+            )
             result_image = self._maybe_enhance(output_images[0], mask)
             return InferenceResult(job_id=job.id, image=result_image, error=None)
         except Exception as exc:

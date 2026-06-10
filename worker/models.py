@@ -46,6 +46,11 @@ class InferenceConfig:
     vae_slicing: bool           # default True
     vae_tiling_resolution: int  # default 1024 — enable tiling above this px
 
+    # --- CatVTON sampling controls (garment texture fidelity) ---
+    num_inference_steps: int = 50          # DDIM steps; higher = finer texture reconstruction
+    guidance_scale: float = 2.5            # CFG scale; CatVTON works best around 2.5
+    use_clip_cross_attn: bool = False      # legacy CLIP image cross-attention (off = official CatVTON)
+
     # --- Real-ESRGAN post-processing (texture / fold enhancement) ---
     enhance: bool = False                  # enable Real-ESRGAN enhancement
     enhance_scale: int = 4                 # model upscale factor (2 or 4)

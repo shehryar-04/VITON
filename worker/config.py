@@ -85,6 +85,15 @@ PIPELINE_TYPE: str = _get_str("PIPELINE_TYPE", "catvton")
 GPU_DEVICE: str = _get_str("GPU_DEVICE", "cuda:0")
 WORKER_COUNT: int = _get_int("WORKER_COUNT", "1")
 
+# CatVTON sampling controls (garment texture fidelity)
+NUM_INFERENCE_STEPS: int = _get_int("NUM_INFERENCE_STEPS", "50")
+GUIDANCE_SCALE: float = float(_get_str("GUIDANCE_SCALE", "2.5"))
+# Legacy CLIP image cross-attention. Default OFF — the official CatVTON design
+# bypasses cross-attention and transfers garment texture via self-attention.
+# Enabling this feeds stock SD1.5 text-trained cross-attention an OOD CLIP token
+# and tends to flatten/smear garment texture.
+USE_CLIP_CROSS_ATTN: bool = _get_bool("USE_CLIP_CROSS_ATTN", "false")
+
 # Supabase (required — already validated above)
 SUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_ANON_KEY: str = os.environ["SUPABASE_ANON_KEY"]

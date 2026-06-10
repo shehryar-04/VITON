@@ -13,7 +13,7 @@ from diffusers.utils.torch_utils import randn_tensor
 from huggingface_hub import snapshot_download
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
-from model.attn_processor import AttnProcessor2_0
+from model.attn_processor import AttnProcessor2_0, SkipAttnProcessor
 from model.iuv_encoder import IUVEncoder, IUV_IN_CHANNELS, prepare_iuv_latent
 from model.utils import get_trainable_module, init_adapter
 from utils import (center_garment, compute_vae_encodings, numpy_to_pil,
@@ -37,21 +37,31 @@ class CatVTONPipeline:
         skip_safety_check=False,
         use_tf32=True,
         use_iuv_conditioning=False,   # NEW: enable DensePose IUV conditioning
+        use_clip_cross_attn=False,    # NEW: legacy CLIP image cross-attention (off = official CatVTON)
     ):
         self.device = device
         self.weight_dtype = weight_dtype
         self.skip_safety_check = skip_safety_check
         self.use_iuv_conditioning = use_iuv_conditioning
+        self.use_clip_cross_attn = use_clip_cross_attn
 
         self.noise_scheduler = DDIMScheduler.from_pretrained(base_ckpt, subfolder="scheduler")
         self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device, dtype=weight_dtype)
 
         # ── CLIP vision encoder (garment image conditioning) ─────────────────
-        self.clip_image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            "openai/clip-vit-large-patch14"
-        ).to(device, dtype=weight_dtype)
-        self.clip_image_encoder.requires_grad_(False)
-        self.clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        # Only loaded for the legacy cross-attention path. The official CatVTON
+        # design bypasses cross-attention entirely (SkipAttnProcessor) and
+        # transfers garment texture through self-attention over the spatially
+        # concatenated person|garment latents — so the CLIP encoder is unused.
+        if use_clip_cross_attn:
+            self.clip_image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+                "openai/clip-vit-large-patch14"
+            ).to(device, dtype=weight_dtype)
+            self.clip_image_encoder.requires_grad_(False)
+            self.clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        else:
+            self.clip_image_encoder = None
+            self.clip_processor = None
 
         if not skip_safety_check:
             self.feature_extractor = CLIPImageProcessor.from_pretrained(base_ckpt, subfolder="feature_extractor")
@@ -76,7 +86,16 @@ class CatVTONPipeline:
         if use_iuv_conditioning:
             self._patch_unet_conv_in(self.unet, extra_channels=IUV_LATENT_CHANNELS)
 
-        init_adapter(self.unet, cross_attn_cls=AttnProcessor2_0)  # Standard cross-attention with CLIP embeddings
+        # ── Attention adapter ────────────────────────────────────────────────
+        # Official CatVTON bypasses cross-attention (SkipAttnProcessor): only the
+        # self-attention layers are trained (the checkpoint loaded below covers
+        # `attn1` only). Leaving cross-attention active (AttnProcessor2_0) feeds
+        # the stock SD1.5 text-trained to_k/to_v weights an out-of-distribution
+        # signal at every block and every step, which smears/flattens the
+        # garment texture transferred by self-attention. Default to the official
+        # skip behaviour; keep the legacy path behind `use_clip_cross_attn`.
+        cross_attn_cls = AttnProcessor2_0 if use_clip_cross_attn else SkipAttnProcessor
+        init_adapter(self.unet, cross_attn_cls=cross_attn_cls)
         self.attn_modules = get_trainable_module(self.unet, "attention")
         self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
         # Pytorch 2.0 Compile
@@ -243,8 +262,13 @@ class CatVTONPipeline:
         condition_t = condition_t.to(self.device, dtype=self.weight_dtype)
         mask_t = mask_t.to(self.device, dtype=self.weight_dtype)
 
-        # Encode garment with CLIP vision
-        garment_embeds = self._encode_garment(garment_pil)  # (1, 1, proj_dim)
+        # Encode garment with CLIP vision (legacy cross-attention path only).
+        # In the default (official) path, cross-attention is skipped and the
+        # garment is conditioned purely via the spatially concatenated latent.
+        if self.use_clip_cross_attn:
+            garment_embeds = self._encode_garment(garment_pil)  # (1, 1, proj_dim)
+        else:
+            garment_embeds = None
 
         # Mask person image
         masked_image = image_t * (mask_t < 0.5)
@@ -310,7 +334,7 @@ class CatVTONPipeline:
             iuv_latent_cfg = iuv_latent
 
         # ── CLIP garment embeddings for cross-attention (CFG) ────────────────
-        if do_classifier_free_guidance:
+        if self.use_clip_cross_attn and do_classifier_free_guidance:
             # CFG: [unconditional (zeros), conditional (garment)]
             garment_embeds = torch.cat([torch.zeros_like(garment_embeds), garment_embeds], dim=0)
 
@@ -427,8 +451,11 @@ class CatVTONPix2PixPipeline(CatVTONPipeline):
         image_t = image_t.to(self.device, dtype=self.weight_dtype)
         condition_t = condition_t.to(self.device, dtype=self.weight_dtype)
 
-        # Encode garment with CLIP vision
-        garment_embeds = self._encode_garment(garment_pil)  # (1, 1, proj_dim)
+        # Encode garment with CLIP vision (legacy cross-attention path only)
+        if self.use_clip_cross_attn:
+            garment_embeds = self._encode_garment(garment_pil)  # (1, 1, proj_dim)
+        else:
+            garment_embeds = None
 
         # VAE encoding
         image_latent = compute_vae_encodings(image_t, self.vae)
@@ -457,7 +484,7 @@ class CatVTONPix2PixPipeline(CatVTONPipeline):
             )
 
         # ── CLIP garment embeddings for cross-attention (CFG) ────────────────
-        if do_classifier_free_guidance:
+        if self.use_clip_cross_attn and do_classifier_free_guidance:
             garment_embeds = torch.cat([torch.zeros_like(garment_embeds), garment_embeds], dim=0)
 
         # Denoising loop
