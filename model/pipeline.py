@@ -98,15 +98,37 @@ class CatVTONPipeline:
         init_adapter(self.unet, cross_attn_cls=cross_attn_cls)
         self.attn_modules = get_trainable_module(self.unet, "attention")
         self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
-        # Pytorch 2.0 Compile
-        if compile:
+        # PyTorch 2.0 compile — only when a working backend is available.
+        # The default Inductor backend requires Triton for CUDA codegen; on
+        # environments without Triton (many notebooks/Colab images) torch.compile
+        # fails at the first forward with "Cannot find a working triton
+        # installation". Guard on it and fall back to eager mode instead.
+        if compile and self._compile_backend_available(device):
             self.unet = torch.compile(self.unet)
             self.vae = torch.compile(self.vae, mode="reduce-overhead")
-            
+        elif compile:
+            print("torch.compile requested but no working Triton/Inductor backend "
+                  "found — running UNet/VAE in eager mode.")
+
         # Enable TF32 for faster training on Ampere GPUs (A100 and RTX 30 series).
         if use_tf32:
             torch.set_float32_matmul_precision("high")
             torch.backends.cuda.matmul.allow_tf32 = True
+
+    @staticmethod
+    def _compile_backend_available(device) -> bool:
+        """
+        Return True only if torch.compile's default Inductor backend can run on
+        the target device. For CUDA that means Triton must be importable; CPU
+        Inductor does not need Triton.
+        """
+        device_str = str(device)
+        if "cuda" in device_str:
+            try:
+                import triton  # noqa: F401
+            except (ImportError, ModuleNotFoundError):
+                return False
+        return True
 
     @staticmethod
     def _patch_unet_conv_in(unet: UNet2DConditionModel, extra_channels: int) -> None:
