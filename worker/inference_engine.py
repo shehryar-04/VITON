@@ -97,14 +97,16 @@ class InferenceEngine:
         Turing GPUs (Tesla T4) have no bf16 tensor cores, so bf16 falls back to
         slow emulation; use fp16 there. Ampere and newer (A10G, A100, RTX 30/40)
         support bf16 natively, which is more numerically robust for Flux.
+
+        NOTE: torch.cuda.is_bf16_supported() returns True on T4 (it counts
+        emulation), so it cannot distinguish native bf16. Check the compute
+        capability directly — native bf16 requires major >= 8 (Ampere+).
         """
         try:
-            if (
-                "cuda" in str(device)
-                and torch.cuda.is_available()
-                and torch.cuda.is_bf16_supported()
-            ):
-                return torch.bfloat16
+            if "cuda" in str(device) and torch.cuda.is_available():
+                major, _ = torch.cuda.get_device_capability()
+                if major >= 8:
+                    return torch.bfloat16
         except Exception:
             pass
         return torch.float16

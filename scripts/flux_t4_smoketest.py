@@ -36,6 +36,12 @@ import time
 
 from PIL import Image
 
+# Make the repo root importable no matter how the script is launched
+# (`python scripts/flux_t4_smoketest.py` only puts scripts/ on sys.path).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 
 def _log(msg: str) -> None:
     print(f"[smoketest] {msg}", flush=True)
@@ -101,9 +107,13 @@ def main() -> int:
         return 1
 
     gpu_name = torch.cuda.get_device_name(0)
-    bf16 = torch.cuda.is_bf16_supported()
-    _log(f"GPU: {gpu_name} | bf16_supported={bf16} | compute_dtype={'bf16' if bf16 else 'fp16'}")
-    if "T4" not in gpu_name and bf16:
+    major, minor = torch.cuda.get_device_capability(0)
+    native_bf16 = major >= 8  # Ampere+ ; T4 (7.5) has no native bf16
+    _log(
+        f"GPU: {gpu_name} | sm_{major}{minor} | native_bf16={native_bf16} | "
+        f"compute_dtype={'bf16' if native_bf16 else 'fp16'}"
+    )
+    if "T4" not in gpu_name and native_bf16:
         _log("note: this script is tuned for T4 (fp16); bf16 GPU detected — that's fine, just not the target.")
 
     # Build the pipeline via the SAME code path the worker uses.
