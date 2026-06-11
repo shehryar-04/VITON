@@ -114,6 +114,11 @@ FLUX_CKPT: str = _get_str("FLUX_CKPT", "")
 # Flux try-on pipeline (FLUX.1-Fill-dev based). Requires a gated HF token for the
 # base model. NF4 4-bit quantization is required to fit a 12B model under 12GB VRAM.
 FLUX_BASE_CKPT: str = _get_str("FLUX_BASE_CKPT", "black-forest-labs/FLUX.1-Fill-dev")
+# Fine-tuned try-on transformer. The base Fill model is a GENERIC inpainter and
+# will not perform try-on (it ignores the garment reference). Set this to a
+# CatVTON-Flux transformer, e.g. "xiaozaa/catvton-flux-alpha" (CC-BY-NC, dev only).
+FLUX_TRANSFORMER_CKPT: str = _get_str("FLUX_TRANSFORMER_CKPT", "")
+FLUX_TRANSFORMER_SUBFOLDER: str = _get_str("FLUX_TRANSFORMER_SUBFOLDER", "")
 FLUX_LORA_PATH: str = _get_str("FLUX_LORA_PATH", "")
 FLUX_QUANTIZE_4BIT: bool = _get_bool("FLUX_QUANTIZE_4BIT", "true")
 # Run the VAE in fp32. The Flux VAE is prone to NaN/black images in fp16 (the

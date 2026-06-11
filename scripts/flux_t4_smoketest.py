@@ -86,7 +86,13 @@ def main() -> int:
     parser.add_argument("--cloth", default=None, help="garment image path")
     parser.add_argument("--mask", default=None, help="mask path (white=inpaint); auto if omitted")
     parser.add_argument("--out", default="flux_smoketest_result.png", help="output image path")
-    parser.add_argument("--base", default=os.environ.get("FLUX_BASE_CKPT", "black-forest-labs/FLUX.1-Fill-dev"))
+    parser.add_argument("--base", default=os.environ.get("FLUX_BASE_CKPT", "black-forest-labs/FLUX.1-Fill-dev"),
+                        help="base model for VAE + scheduler")
+    parser.add_argument("--transformer", default=os.environ.get("FLUX_TRANSFORMER_CKPT", ""),
+                        help="fine-tuned try-on transformer (e.g. xiaozaa/catvton-flux-alpha). "
+                             "Without it the base Fill model ignores the garment.")
+    parser.add_argument("--transformer-subfolder", default=os.environ.get("FLUX_TRANSFORMER_SUBFOLDER", ""),
+                        help="subfolder of the transformer repo ('' = root)")
     parser.add_argument("--lora", default=os.environ.get("FLUX_LORA_PATH", ""), help="optional try-on LoRA path")
     parser.add_argument("--height", type=int, default=int(os.environ.get("FLUX_HEIGHT", "1024")))
     parser.add_argument("--width", type=int, default=int(os.environ.get("FLUX_WIDTH", "768")))
@@ -129,6 +135,8 @@ def main() -> int:
         vae_slicing=False,
         vae_tiling_resolution=1024,
         flux_base_ckpt=args.base,
+        flux_transformer_ckpt=args.transformer,
+        flux_transformer_subfolder=args.transformer_subfolder,
         flux_lora_path=args.lora,
         flux_quantize_4bit=not args.no_quant,
         flux_vae_fp32=not args.vae_compute_dtype,

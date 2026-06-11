@@ -52,8 +52,10 @@ class InferenceConfig:
     use_clip_cross_attn: bool = False      # legacy CLIP image cross-attention (off = official CatVTON)
 
     # --- Flux try-on pipeline (FLUX.1-Fill-dev based) ---
-    flux_base_ckpt: str = "black-forest-labs/FLUX.1-Fill-dev"  # gated HF repo (needs token)
-    flux_lora_path: str = ""               # optional try-on LoRA (base + LoRA); empty = merged model
+    flux_base_ckpt: str = "black-forest-labs/FLUX.1-Fill-dev"  # gated HF repo (needs token); provides VAE + scheduler
+    flux_transformer_ckpt: str = ""        # fine-tuned try-on transformer (e.g. xiaozaa/catvton-flux-alpha); empty = base (generic fill, NOT try-on)
+    flux_transformer_subfolder: str = ""   # subfolder of the transformer repo ("" = root, as in xiaozaa; base uses "transformer")
+    flux_lora_path: str = ""               # optional try-on LoRA (alternative to a fine-tuned transformer)
     flux_quantize_4bit: bool = True        # NF4 4-bit transformer — required for <12GB VRAM
     flux_vae_fp32: bool = True             # run VAE in fp32 (T4/fp16 safety against black images)
     flux_cpu_offload: str = "model"        # "model" | "sequential" | "none"

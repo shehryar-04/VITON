@@ -131,6 +131,22 @@ class InferenceEngine:
                 "Set FLUX_BASE_CKPT (e.g. 'black-forest-labs/FLUX.1-Fill-dev')."
             )
 
+        # The base Fill model provides the VAE + scheduler. The TRANSFORMER may
+        # come from a separate fine-tuned try-on checkpoint (e.g.
+        # xiaozaa/catvton-flux-alpha), which ships only the transformer at the
+        # repo root. Without a try-on transformer (or LoRA), the base Fill model
+        # is a generic inpainter and will IGNORE the garment reference.
+        if config.flux_transformer_ckpt:
+            transformer_src = config.flux_transformer_ckpt
+            transformer_subfolder = config.flux_transformer_subfolder or None
+        else:
+            transformer_src = base
+            transformer_subfolder = "transformer"
+            logger.warning(
+                "No FLUX_TRANSFORMER_CKPT set — using the base Fill transformer. "
+                "This performs generic inpainting, NOT try-on (the garment will be ignored)."
+            )
+
         # Compute dtype is hardware-dependent:
         #   - Turing (Tesla T4): NO bf16 hardware → must use fp16.
         #   - Ampere+ (A10G):    native bf16 → use bf16 (more numerically robust).
@@ -157,12 +173,15 @@ class InferenceEngine:
                     compute_dtype,
                 )
 
-        transformer_kwargs = {"subfolder": "transformer", "torch_dtype": compute_dtype}
+        transformer_kwargs = {"torch_dtype": compute_dtype}
+        if transformer_subfolder is not None:
+            transformer_kwargs["subfolder"] = transformer_subfolder
         if quant_config is not None:
             transformer_kwargs["quantization_config"] = quant_config
 
-        transformer = FluxTransformer2DModel.from_pretrained(base, **transformer_kwargs)
+        transformer = FluxTransformer2DModel.from_pretrained(transformer_src, **transformer_kwargs)
         transformer.remove_text_layers()  # try-on uses no text conditioning
+        logger.info("Flux transformer source: %s (subfolder=%s)", transformer_src, transformer_subfolder)
         # VAE precision: fp32 by default for T4/fp16 numerical safety (avoids
         # NaN/black decodes). The pipeline casts tensors at the VAE boundary so
         # a VAE dtype differing from the transformer dtype works correctly.
