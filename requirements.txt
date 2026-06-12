@@ -1,6 +1,8 @@
 torch==2.4.0
 torchvision==0.19.0 
-accelerate==0.31.0
+# Bumped from 0.31.0: peft 0.14 needs accelerate>=0.34 (clear_device_cache),
+# and diffusers 4-bit (bitsandbytes) quantization also wants a recent accelerate.
+accelerate>=0.34.0
 # Pinned: 0.32.x has Flux Fill (pipeline_flux_fill) but not the newer
 # attention_dispatch/flash-attn-3 custom ops that break on torch 2.4.
 diffusers==0.32.2

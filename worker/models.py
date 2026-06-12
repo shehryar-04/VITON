@@ -71,3 +71,9 @@ class InferenceConfig:
     enhance_region_only: bool = True       # enhance only the garment (masked) region
     enhance_weight_path: str = ""          # local .pth path; empty = download official
     enhance_tile: int = 512                # tile size for tiled inference (0 = off)
+
+    # --- Mask post-processing & composite ---
+    mask_dilation_px: int = 0              # pixels to dilate mask outward (0 = no dilation)
+    mask_feather_px: int = 0              # Gaussian blur radius for mask edge (0 = no feathering)
+    mask_composite_enabled: bool = True   # paste original into unmasked regions post-decode
+    mask_composite_feather_px: int = 0    # feather radius for composite blend (0-50, 0 = hard edges)

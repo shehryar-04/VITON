@@ -71,6 +71,9 @@ def _build_engine(pipeline_type: str = "catvton"):
     engine.config = _mock_config(pipeline_type)
     engine.pipeline = None  # replaced per-test
     engine.auto_masker = None
+    engine.enhancer = None
+    engine.preprocessing_cache = None
+    engine._mask_cache = {}
     return engine
 
 

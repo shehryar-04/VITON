@@ -18,7 +18,15 @@ from typing import Optional
 import requests
 from PIL import Image
 
+from worker.mask_utils import (
+    VALID_CLOTH_TYPES,
+    align_to_multiple_of_16,
+    composite_with_mask,
+    dilate_mask,
+    feather_mask,
+)
 from worker.models import InferenceConfig, InferenceResult, JobRecord
+from worker.preprocessing_cache import PreprocessingCache
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,8 @@ class InferenceEngine:
         self.pipeline = self._load_pipeline(config)
         self.auto_masker = self._load_auto_masker(config)
         self.enhancer = self._load_enhancer(config)
+        self.preprocessing_cache = PreprocessingCache()
+        self._mask_cache: dict[str, Image.Image] = {}  # key: "{image_key}:{cloth_type}"
 
     # ------------------------------------------------------------------
     # Initialisation helpers
@@ -274,7 +284,9 @@ class InferenceEngine:
         try:
             user_image = _download_image(job.user_image_url)
             cloth_image = _download_image(job.cloth_image_url)
-            mask = self._get_or_generate_mask(job, user_image)
+            # CatVTON uses shared Mask_Helper with no-op defaults (Requirement 8.1, 8.4)
+            # dilation=0, feathering=0, no composite — output byte-identical to pre-feature
+            mask = self._get_or_generate_mask(job, user_image, dilation_px=0, feather_px=0)
             output_images = self.pipeline(
                 image=user_image,
                 condition_image=cloth_image,
@@ -282,6 +294,7 @@ class InferenceEngine:
                 num_inference_steps=self.config.num_inference_steps,
                 guidance_scale=self.config.guidance_scale,
             )
+            # No composite for CatVTON (Requirement 8.4: composite disabled by default)
             result_image = self._maybe_enhance(output_images[0], mask)
             return InferenceResult(job_id=job.id, image=result_image, error=None)
         except Exception as exc:
@@ -298,18 +311,39 @@ class InferenceEngine:
             try:
                 user_image = _download_image(job.user_image_url)
                 cloth_image = _download_image(job.cloth_image_url)
-                mask = self._get_or_generate_mask(job, user_image)
+                mask = self._get_or_generate_mask(
+                    job, user_image,
+                    dilation_px=self.config.mask_dilation_px,
+                    feather_px=self.config.mask_feather_px,
+                )
                 result = self._run_flux_single(job, user_image, cloth_image, mask)
             except Exception as exc:
-                logger.exception("Image download failed for job %s", job.id)
+                logger.exception("Flux job failed for job %s", job.id)
                 result = InferenceResult(job_id=job.id, image=None, error=str(exc))
             results.append(result)
         return results
 
     def _run_flux_single(self, job: JobRecord, user_image, cloth_image, mask) -> InferenceResult:
         try:
-            output = self._flux_infer(user_image, cloth_image, mask)
+            # Align dimensions to multiples of 16
+            flux_w, flux_h = align_to_multiple_of_16(self.config.flux_width, self.config.flux_height)
+
+            # Resize all inputs to aligned Flux dimensions
+            user_resized = user_image.resize((flux_w, flux_h), Image.LANCZOS)
+            cloth_resized = cloth_image.resize((flux_w, flux_h), Image.LANCZOS)
+            mask_resized = mask.resize((flux_w, flux_h), Image.NEAREST)
+
+            # Run inference with resized inputs
+            output = self._flux_infer(user_resized, cloth_resized, mask_resized)
             image = output.images[0] if hasattr(output, "images") else output[0]
+
+            # Post-decode composite: paste original into unmasked regions
+            if self.config.mask_composite_enabled:
+                image = composite_with_mask(
+                    user_image, image, mask,
+                    feather_px=self.config.mask_composite_feather_px,
+                )
+
             image = self._maybe_enhance(image, mask)
             return InferenceResult(job_id=job.id, image=image, error=None)
         except Exception as exc:
@@ -373,9 +407,110 @@ class InferenceEngine:
     # Mask helpers
     # ------------------------------------------------------------------
 
-    def _get_or_generate_mask(self, job: JobRecord, user_image: Image.Image) -> Image.Image:
-        if self.auto_masker is not None:
+    def _get_or_generate_mask(
+        self,
+        job: JobRecord,
+        user_image: Image.Image,
+        *,
+        dilation_px: int = 0,
+        feather_px: int = 0,
+    ) -> Image.Image:
+        """
+        Generate or retrieve a garment-agnostic mask for the given job.
+
+        Args:
+            job: The job record containing cloth_type.
+            user_image: The person PIL image.
+            dilation_px: Pixels to dilate the mask outward (0 = no dilation).
+            feather_px: Gaussian blur radius for edge feathering (0 = no feathering).
+
+        Returns:
+            Single-channel grayscale (mode "L") PIL image with same dimensions
+            as user_image. White (255) = regenerate, Black (0) = preserve.
+
+        Raises:
+            ValueError: If cloth_type is not in VALID_CLOTH_TYPES.
+            ValueError: If dilation_px or feather_px is negative or non-integer.
+        """
+        # --- Validate dilation_px and feather_px (Requirement 5.5) ---
+        if not isinstance(dilation_px, int) or isinstance(dilation_px, bool):
+            raise ValueError(
+                f"dilation_px must be a non-negative integer, got {type(dilation_px).__name__}: {dilation_px!r}"
+            )
+        if dilation_px < 0:
+            raise ValueError(
+                f"dilation_px must be a non-negative integer, got {dilation_px}"
+            )
+        if not isinstance(feather_px, int) or isinstance(feather_px, bool):
+            raise ValueError(
+                f"feather_px must be a non-negative integer, got {type(feather_px).__name__}: {feather_px!r}"
+            )
+        if feather_px < 0:
+            raise ValueError(
+                f"feather_px must be a non-negative integer, got {feather_px}"
+            )
+
+        # --- Validate cloth_type (Requirement 1.5) ---
+        if job.cloth_type not in VALID_CLOTH_TYPES:
+            raise ValueError(
+                f"Invalid cloth_type: '{job.cloth_type}'. "
+                f"Must be one of: {', '.join(sorted(VALID_CLOTH_TYPES))}"
+            )
+
+        # --- Fallback when AutoMasker is unavailable (Requirements 1.6, 3.2, 3.3) ---
+        if self.auto_masker is None:
+            logger.warning("AutoMasker unavailable for job %s — using blank mask", job.id)
+            return Image.new("L", user_image.size, 255)
+
+        # --- Check mask cache for same image + cloth_type (Requirement 7.1) ---
+        image_key = PreprocessingCache.compute_key(user_image)
+        cache_key = f"{image_key}:{job.cloth_type}"
+
+        if cache_key in self._mask_cache:
+            logger.debug("Mask cache hit for job %s (key=%s)", job.id, cache_key[:24])
+            mask = self._mask_cache[cache_key]
+        else:
+            # --- Call AutoMasker (Requirement 1.1, 1.2, 1.4) ---
             result = self.auto_masker(user_image, mask_type=job.cloth_type)
-            return result["mask"]
-        logger.warning("AutoMasker unavailable for job %s — using blank mask", job.id)
-        return Image.new("L", user_image.size, 255)
+            mask = result["mask"]
+
+            # --- Store preprocessing outputs in cache (Requirement 7.2) ---
+            cached = self.preprocessing_cache.get(image_key)
+            if cached is None:
+                # Convert preprocessing images to PNG bytes for caching
+                from worker.models import PreprocessResult
+
+                densepose_png = self._image_to_png_bytes(result.get("densepose"))
+                schp_atr_png = self._image_to_png_bytes(result.get("schp_atr"))
+                schp_lip_png = self._image_to_png_bytes(result.get("schp_lip"))
+
+                # Only cache if all three outputs are available
+                if densepose_png and schp_atr_png and schp_lip_png:
+                    preprocess_result = PreprocessResult(
+                        densepose_png=densepose_png,
+                        schp_atr_png=schp_atr_png,
+                        schp_lip_png=schp_lip_png,
+                    )
+                    self.preprocessing_cache.put(image_key, preprocess_result)
+
+            # Store the mask in local cache for future same-image+cloth_type requests
+            self._mask_cache[cache_key] = mask
+
+        # --- Apply dilation (Requirement 5.1, 5.6: dilation before feathering) ---
+        if dilation_px > 0:
+            mask = dilate_mask(mask, dilation_px)
+
+        # --- Apply feathering (Requirement 5.2) ---
+        if feather_px > 0:
+            mask = feather_mask(mask, feather_px)
+
+        return mask
+
+    @staticmethod
+    def _image_to_png_bytes(img) -> bytes:
+        """Convert a PIL Image to lossless PNG bytes. Returns empty bytes if img is None."""
+        if img is None:
+            return b""
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()

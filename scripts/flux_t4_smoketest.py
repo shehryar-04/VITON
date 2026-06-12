@@ -69,22 +69,14 @@ def _make_dummy(width: int, height: int) -> tuple[Image.Image, Image.Image]:
     return person, garment
 
 
-def _make_mask(width: int, height: int) -> Image.Image:
-    """Center torso rectangle as the inpaint region (white = generate)."""
-    import numpy as np
-
-    m = np.zeros((height, width), dtype=np.uint8)
-    x0, x1 = int(width * 0.25), int(width * 0.75)
-    y0, y1 = int(height * 0.20), int(height * 0.70)
-    m[y0:y1, x0:x1] = 255
-    return Image.fromarray(m, mode="L")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flux try-on T4 smoke test")
     parser.add_argument("--person", default=None, help="person image path")
     parser.add_argument("--cloth", default=None, help="garment image path")
     parser.add_argument("--mask", default=None, help="mask path (white=inpaint); auto if omitted")
+    parser.add_argument("--cloth-type", default="upper",
+                        choices=["upper", "lower", "overall", "inner", "outer"],
+                        help="garment type for AutoMasker (default: upper)")
     parser.add_argument("--out", default="flux_smoketest_result.png", help="output image path")
     parser.add_argument("--base", default=os.environ.get("FLUX_BASE_CKPT", "black-forest-labs/FLUX.1-Fill-dev"),
                         help="base model for VAE + scheduler")
@@ -101,6 +93,12 @@ def main() -> int:
     parser.add_argument("--no-quant", action="store_true", help="disable NF4 4-bit (needs ~24GB)")
     parser.add_argument("--vae-compute-dtype", action="store_true", help="run VAE in compute dtype instead of fp32")
     args = parser.parse_args()
+
+    # Belt-and-suspenders validation for programmatic invocation
+    VALID_CLOTH_TYPES = {"upper", "lower", "overall", "inner", "outer"}
+    if args.cloth_type not in VALID_CLOTH_TYPES:
+        _log(f"ERROR: invalid --cloth-type '{args.cloth_type}'. Must be one of: {', '.join(sorted(VALID_CLOTH_TYPES))}")
+        return 1
 
     try:
         import torch
@@ -178,10 +176,40 @@ def main() -> int:
     else:
         person, cloth = _make_dummy(args.width, args.height)
         _log("Using synthetic person/cloth images (no --person/--cloth given).")
-    mask = (
-        Image.open(args.mask).convert("L").resize((args.width, args.height))
-        if args.mask else _make_mask(args.width, args.height)
-    )
+    # --- Mask resolution flow ---
+    if args.mask:
+        # Manual mask override
+        if not os.path.isfile(args.mask):
+            _log(f"ERROR: mask path not found or not readable: {args.mask}")
+            return 1
+        try:
+            mask = Image.open(args.mask).convert("L").resize((args.width, args.height))
+            _log(f"Using manual mask from: {args.mask}")
+        except Exception as exc:
+            _log(f"ERROR: could not open mask file '{args.mask}': {exc}")
+            return 1
+    else:
+        # Try AutoMasker
+        auto_masker = None
+        try:
+            from model.cloth_masker import AutoMasker
+            import worker.config as cfg
+            auto_masker = AutoMasker(
+                densepose_ckpt=cfg.DENSEPOSE_CKPT or "./Models/DensePose",
+                schp_ckpt=cfg.SCHP_CKPT or "./Models/SCHP",
+                device="cuda:0",
+            )
+            _log("AutoMasker loaded for mask generation.")
+        except Exception as exc:
+            _log(f"AutoMasker unavailable ({exc}) — falling back to blank mask.")
+
+        if auto_masker is not None:
+            result = auto_masker(person, mask_type=args.cloth_type)
+            mask = result["mask"].resize((args.width, args.height), Image.NEAREST)
+            _log(f"Generated AutoMasker mask with cloth_type='{args.cloth_type}'")
+        else:
+            _log("WARNING: No mask source available — using blank mask (all white, full regeneration).")
+            mask = Image.new("L", (args.width, args.height), 255)
 
     _log(f"Running inference: {args.steps} steps, guidance={args.guidance}, {args.width}x{args.height} ...")
     t0 = time.time()
