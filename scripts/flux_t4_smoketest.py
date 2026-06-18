@@ -154,6 +154,11 @@ def main() -> int:
     engine.config = config
 
     torch.cuda.reset_peak_memory_stats()
+    if args.transformer:
+        _log(f"Try-on transformer: '{args.transformer}' (subfolder='{args.transformer_subfolder or '(root)'}')")
+    else:
+        _log("Try-on transformer: NONE — using base Fill transformer. "
+             "This is GENERIC INPAINTING; the garment WILL be ignored (expect a flat/gray fill).")
     _log(f"Loading Flux pipeline from '{args.base}' (4bit={not args.no_quant}, vae_fp32={not args.vae_compute_dtype}) ...")
     t0 = time.time()
     from model.flux.pipeline_flux_tryon import FluxTryOnPipeline

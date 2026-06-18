@@ -10,11 +10,38 @@ from diffusers.loaders import (
     TextualInversionLoaderMixin,
 )
 from diffusers.models.autoencoders import AutoencoderKL
-from diffusers.pipelines.flux.pipeline_flux_fill import (
-    calculate_shift,
-    retrieve_latents,
-    retrieve_timesteps,
-)
+# These three helpers live in `pipeline_flux_fill` on recent diffusers (>=0.32),
+# but moved/were-added across versions. FLUX.1-Fill is reimplemented here, so we
+# only need the helpers — import them resiliently so the pipeline loads on the
+# range of diffusers versions found in the wild (0.30+), not just one.
+try:  # diffusers >= 0.32 (FluxFillPipeline present)
+    from diffusers.pipelines.flux.pipeline_flux_fill import (
+        calculate_shift,
+        retrieve_latents,
+        retrieve_timesteps,
+    )
+except (ImportError, ModuleNotFoundError):
+    # `calculate_shift` / `retrieve_timesteps` are defined on the base Flux pipeline.
+    from diffusers.pipelines.flux.pipeline_flux import (
+        calculate_shift,
+        retrieve_timesteps,
+    )
+    # `retrieve_latents` only exists on image-conditioned Flux pipelines.
+    try:
+        from diffusers.pipelines.flux.pipeline_flux_img2img import retrieve_latents
+    except (ImportError, ModuleNotFoundError):
+        try:
+            from diffusers.pipelines.flux.pipeline_flux_inpaint import retrieve_latents
+        except (ImportError, ModuleNotFoundError):
+            # Last-resort: minimal local fallback matching diffusers' implementation.
+            def retrieve_latents(encoder_output, generator=None, sample_mode="sample"):
+                if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
+                    return encoder_output.latent_dist.sample(generator)
+                if hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
+                    return encoder_output.latent_dist.mode()
+                if hasattr(encoder_output, "latents"):
+                    return encoder_output.latents
+                raise AttributeError("Could not access latents of provided encoder_output")
 from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
